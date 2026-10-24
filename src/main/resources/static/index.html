@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Speech to Text</title>
+<style>
+  :root{--bg:#f6f7f9;--card:#fff;--ink:#14181f;--mute:#667085;--line:#e4e7ec;--accent:#2f5bea;--danger:#d92d20;--ok:#12805c}
+  @media (prefers-color-scheme:dark){:root{--bg:#0e1116;--card:#171b22;--ink:#e8ecf2;--mute:#8b95a5;--line:#262c36;--accent:#6c8cff;--danger:#f97066;--ok:#47cd89}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans Devanagari",sans-serif}
+  main{max-width:980px;margin:0 auto;padding:24px 16px 64px}
+  h1{font-size:22px;margin:0 0 4px} .sub{color:var(--mute);margin:0 0 20px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:18px;margin-bottom:20px}
+  button{font:inherit;border:1px solid var(--line);background:var(--card);color:var(--ink);padding:7px 14px;border-radius:8px;cursor:pointer}
+  button:hover{border-color:var(--accent)}
+  button.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  button.rec{background:var(--danger);border-color:var(--danger);color:#fff}
+  button.link{border:0;background:none;color:var(--accent);padding:2px 6px}
+  button.link.del{color:var(--danger)}
+  button:disabled{opacity:.5;cursor:not-allowed}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+  .grow{flex:1}
+  #status{color:var(--mute);font-size:13px}
+  #live{min-height:96px;margin-top:14px;padding:12px;border:1px dashed var(--line);border-radius:8px;white-space:pre-wrap;font-size:17px}
+  #live:empty::before{content:"Press Start and speak — Hindi, English, or both…";color:var(--mute)}
+  .dot{width:10px;height:10px;border-radius:50%;background:var(--mute);display:inline-block}
+  .dot.on{background:var(--danger);animation:p 1s infinite} @keyframes p{50%{opacity:.3}}
+  input,textarea{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:8px 10px;width:100%}
+  table{width:100%;border-collapse:collapse} th,td{text-align:left;padding:10px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-size:12px;color:var(--mute);text-transform:uppercase;letter-spacing:.04em}
+  td.txt{max-width:420px;overflow:hidden;text-overflow:ellipsis;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+  td.meta{color:var(--mute);font-size:13px;white-space:nowrap}
+  .empty{color:var(--mute);text-align:center;padding:28px}
+  dialog{border:1px solid var(--line);border-radius:12px;background:var(--card);color:var(--ink);width:min(560px,92vw);padding:20px}
+  dialog::backdrop{background:#0008} label{display:block;font-size:13px;color:var(--mute);margin:12px 0 4px}
+  .toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:9px 16px;border-radius:8px;opacity:0;transition:.25s;pointer-events:none}
+  .toast.show{opacity:1}
+  @media(max-width:640px){th:nth-child(3),td:nth-child(3),th:nth-child(4),td:nth-child(4){display:none}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Speech to Text</h1>
+  <p class="sub">Live multilingual transcription (Hindi + English) powered by the Gemini Live API.</p>
+
+  <section class="card">
+    <div class="row">
+      <button id="btn" class="primary">● Start</button>
+      <span class="dot" id="dot"></span><span id="status">Idle</span>
+    </div>
+    <div id="live" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <div class="row" style="margin-bottom:12px">
+      <h2 style="margin:0;font-size:17px" class="grow">Transcription history</h2>
+      <input id="q" placeholder="Search…" style="max-width:220px">
+      <button id="add">+ New</button>
+    </div>
+    <table>
+      <thead><tr><th>Title</th><th>Text</th><th>Length</th><th>Created</th><th></th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="row" style="margin-top:12px;justify-content:space-between">
+      <button id="prev">← Prev</button><span id="pg" class="sub" style="margin:0"></span><button id="next">Next →</button>
+    </div>
+  </section>
+</main>
+
+<dialog id="dlg">
+  <form method="dialog" id="form">
+    <h3 id="dlgTitle" style="margin:0">Edit</h3>
+    <label for="fTitle">Title</label><input id="fTitle" maxlength="200">
+    <label for="fText">Transcript</label><textarea id="fText" rows="8" required></textarea>
+    <div class="row" style="margin-top:16px;justify-content:flex-end">
+      <button type="button" id="cancel">Cancel</button><button class="primary" id="save" value="ok">Save</button>
+    </div>
+  </form>
+</dialog>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = id => document.getElementById(id);
+const API = '/api/transcriptions';
+let page = 0, totalPages = 1, editingId = null, timer;
+
+/* ---------------- Dashboard (CRUD) ---------------- */
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function toast(m){const t=$('toast');t.textContent=m;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200)}
+
+async function load() {
+  const r = await fetch(`${API}?page=${page}&size=8&q=${encodeURIComponent($('q').value)}`);
+  const d = await r.json();
+  totalPages = Math.max(d.totalPages, 1);
+  $('rows').innerHTML = d.content.length ? d.content.map(t => `
+    <tr>
+      <td><strong>${esc(t.title)}</strong></td>
+      <td class="txt">${esc(t.text)}</td>
+      <td class="meta">${t.durationSeconds ?? '–'}s</td>
+      <td class="meta">${new Date(t.createdAt).toLocaleString()}</td>
+      <td style="white-space:nowrap">
+        <button class="link" onclick="edit(${t.id})">Edit</button>
+        <button class="link" onclick="copyText(${t.id})">Copy</button>
+        <button class="link del" onclick="del(${t.id})">Delete</button>
+      </td></tr>`).join('') : '<tr><td colspan="5" class="empty">No transcriptions yet.</td></tr>';
+  $('pg').textContent = `Page ${page + 1} of ${totalPages}`;
+  $('prev').disabled = page === 0; $('next').disabled = page + 1 >= totalPages;
+}
+$('prev').onclick = () => { page--; load(); };
+$('next').onclick = () => { page++; load(); };
+$('q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { page = 0; load(); }, 250); };
+
+function openDialog(id, t) {
+  editingId = id;
+  $('dlgTitle').textContent = id ? 'Edit transcription' : 'New transcription';
+  $('fTitle').value = t?.title ?? ''; $('fText').value = t?.text ?? '';
+  $('dlg').showModal();
+}
+$('add').onclick = () => openDialog(null);
+$('cancel').onclick = () => $('dlg').close();
+async function edit(id){ openDialog(id, await (await fetch(`${API}/${id}`)).json()); }
+async function copyText(id){ const t = await (await fetch(`${API}/${id}`)).json(); await navigator.clipboard.writeText(t.text); toast('Copied'); }
+async function del(id){ if(!confirm('Delete this transcription?')) return; await fetch(`${API}/${id}`,{method:'DELETE'}); toast('Deleted'); load(); }
+$('form').onsubmit = async e => {
+  if (e.submitter?.id !== 'save') return;
+  const body = JSON.stringify({ title: $('fTitle').value, text: $('fText').value, language: 'Hindi + English (auto)' });
+  const r = await fetch(editingId ? `${API}/${editingId}` : API, {method: editingId ? 'PUT' : 'POST', headers:{'Content-Type':'application/json'}, body});
+  toast(r.ok ? 'Saved' : 'Could not save'); load();
+};
+
+/* ---------------- Real-time transcription ---------------- */
+let ws, ctx, stream, node, recording = false;
+
+function setStatus(s, on){ $('status').textContent = s; $('dot').classList.toggle('on', !!on); }
+
+async function start() {
+  $('live').textContent = '';
+  setStatus('Connecting…');
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({audio:{channelCount:1, echoCancellation:true, noiseSuppression:true}});
+  } catch { setStatus('Microphone permission denied'); return; }
+
+  ws = new WebSocket((location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws/transcribe');
+  ws.binaryType = 'arraybuffer';
+  ws.onmessage = async ev => {
+    const m = JSON.parse(ev.data);
+    if (m.type === 'ready') { await startAudio(); }
+    else if (m.type === 'transcript') { $('live').textContent += m.text; }
+    else if (m.type === 'saved') { setStatus('Saved ✓'); toast('Transcription saved'); page = 0; load(); }
+    else if (m.type === 'empty') { setStatus('No speech detected'); }
+    else if (m.type === 'error') { setStatus('Error: ' + m.message); stopAudio(); }
+  };
+  ws.onclose = () => { if (recording) stopAudio(); };
+}
+
+async function startAudio() {
+  ctx = new AudioContext();
+  await ctx.audioWorklet.addModule('/pcm-worklet.js');
+  const src = ctx.createMediaStreamSource(stream);
+  node = new AudioWorkletNode(ctx, 'pcm-worklet');
+  node.port.onmessage = e => { if (ws?.readyState === 1) ws.send(e.data); };
+  src.connect(node);
+  recording = true;
+  $('btn').textContent = '■ Stop'; $('btn').className = 'rec';
+  setStatus('Listening…', true);
+}
+
+function stopAudio() {
+  recording = false;
+  node?.disconnect(); ctx?.close(); stream?.getTracks().forEach(t => t.stop());
+  $('btn').textContent = '● Start'; $('btn').className = 'primary';
+  $('dot').classList.remove('on');
+}
+
+$('btn').onclick = () => {
+  if (!recording) return start();
+  stopAudio(); setStatus('Finalizing…');
+  if (ws?.readyState === 1) ws.send('stop');
+};
+
+load();
+</script>
+</body>
+</html>
